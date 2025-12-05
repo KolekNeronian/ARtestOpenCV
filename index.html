@@ -44,7 +44,7 @@
     <div id="ui-layer">
         <div id="status-bar">Initializing System...</div>
         <div>
-            <div id="instructions">SCANNING... TAP ANYWHERE TO PLACE</div>
+            <div id="instructions">SCANNING... TAP TO PLACE</div>
             <div id="debug-log">Log started...</div>
         </div>
     </div>
@@ -88,10 +88,9 @@
         let p0, p1, st, err;
         let initialObjectPoints = [];
         let rvec, tvec, distCoeffs, cameraMatrix;
-        let useFallbackMath = false;
-
+        
         // Smoothing Variables
-        const SMOOTHING_FACTOR = 0.15; // Lower = Smoother but laggier. Higher = Jittery.
+        const SMOOTHING_FACTOR = 0.1; // Smoother movement
         let targetPosition = new THREE.Vector3();
         let targetQuaternion = new THREE.Quaternion();
 
@@ -146,11 +145,6 @@
             try {
                 log("Initializing AR Engine...");
                 
-                if (typeof cv.solvePnP !== 'function') {
-                    log("WARNING: cv.solvePnP missing. Using Homography fallback.");
-                    useFallbackMath = true;
-                }
-
                 canvas = document.getElementById('canvasOutput');
                 canvas.width = window.innerWidth;
                 canvas.height = window.innerHeight;
@@ -179,8 +173,8 @@
                 ]);
                 
                 distCoeffs = cv.Mat.zeros(4, 1, cv.CV_64FC1);
-                rvec = new cv.Mat();
-                tvec = new cv.Mat();
+                rvec = new cv.Mat(); // Initial Rotation (0,0,0)
+                tvec = new cv.Mat(); // Initial Translation
 
                 updateStatus("SCANNING SURFACES...");
                 log("Scan Mode Active.");
@@ -209,10 +203,10 @@
             dl.position.set(0, 1, 1);
             scene.add(dl);
 
-            scene.add(new THREE.AxesHelper(1));
+            // Large Axis Helper for Orientation Debugging
+            scene.add(new THREE.AxesHelper(2));
 
             const geometry = new THREE.BoxGeometry(0.5, 0.5, 0.5);
-            // Changed to NormalMaterial for better visibility
             const material = new THREE.MeshNormalMaterial({ wireframe: false }); 
             cube = new THREE.Mesh(geometry, material);
             cube.visible = false; 
@@ -222,7 +216,7 @@
             const pointsGeo = new THREE.BufferGeometry();
             const positions = new Float32Array(150 * 3); 
             pointsGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-            const pointsMat = new THREE.PointsMaterial({ color: 0xffff00, size: 4, sizeAttenuation: false });
+            const pointsMat = new THREE.PointsMaterial({ color: 0xffff00, size: 6, sizeAttenuation: false });
             featurePointsMesh = new THREE.Points(pointsGeo, pointsMat);
             featurePointsMesh.frustumCulled = false;
             scene.add(featurePointsMesh);
@@ -230,7 +224,6 @@
 
         function handleUserClick(e) {
             if (isTracking) {
-                // Reset to scanning
                 isTracking = false;
                 isScanning = true;
                 cube.visible = false;
@@ -240,8 +233,7 @@
             }
 
             if (isScanning && p0.rows > 8) {
-                // Pass the click event so we know WHERE to place the cube
-                startTracking(e.clientX, e.clientY);
+                startTracking();
             } else {
                 updateStatus("Surface not detected. Move camera.");
             }
@@ -273,9 +265,10 @@
                 let x = pointMat.data32F[i * 2];
                 let y = pointMat.data32F[i * 2 + 1];
                 
+                // Visualization Only: Map 2D -> 3D Screen Space
                 positions[ptr++] = (x - streamWidth/2) * scale;
                 positions[ptr++] = -(y - streamHeight/2) * scale;
-                positions[ptr++] = -5; 
+                positions[ptr++] = -5; // Fixed depth 5 meters in front
             }
             
             for (let i = pointMat.rows; i < 150; i++) {
@@ -285,18 +278,21 @@
             }
             
             featurePointsMesh.geometry.attributes.position.needsUpdate = true;
+            
+            // Reset camera during scan so overlay matches video
             camera.position.set(0,0,0);
-            camera.rotation.set(0,0,0);
+            camera.quaternion.set(0,0,0,1);
         }
 
-        function startTracking(clickX, clickY) {
+        function startTracking() {
             log("Locking features...");
             
+            // Lock the current 'p0' points as the World Anchor (Z=0)
             initialObjectPoints = [];
             for (let i = 0; i < p0.rows; i++) {
                 let x = p0.data32F[i * 2];
                 let y = p0.data32F[i * 2 + 1];
-                // Map to 3D Plane Z=0
+                // Scale factor 0.01 means 100 pixels = 1 meter approx
                 initialObjectPoints.push((x - streamWidth/2) * 0.01);
                 initialObjectPoints.push(-(y - streamHeight/2) * 0.01); 
                 initialObjectPoints.push(0); 
@@ -306,35 +302,14 @@
             cube.visible = true;
             featurePointsMesh.visible = false;
             
-            // --- FIX PLACEMENT LOGIC ---
-            // Calculate where the user clicked relative to the center of the stream
-            // We use the same scale (0.01) as we used for the world points
+            // Place cube exactly at World Center (0,0,0)
+            // This ensures it spawns in the middle of the tracked features
+            cube.position.set(0, 0, 0); 
             
-            // Adjust for canvas stretching if CSS resizes it
-            const rect = canvas.getBoundingClientRect();
-            const scaleX = canvas.width / rect.width;
-            const scaleY = canvas.height / rect.height;
-            
-            // Get click position in Canvas Coordinates
-            const canvasX = (clickX - rect.left) * scaleX;
-            const canvasY = (clickY - rect.top) * scaleY;
-
-            // Since video aspect might differ from screen aspect, we map relative to video center
-            // NOTE: This assumes video fills screen or is centered. 
-            // For MVP, we treat screen pixels == video pixels roughly
-            
-            // Map to World Coordinates (same logic as initialObjectPoints)
-            const worldClickX = (canvasX - streamWidth/2) * 0.01;
-            const worldClickY = -(canvasY - streamHeight/2) * 0.01;
-
-            cube.position.set(worldClickX, worldClickY, 0);
-            
-            // Reset Target for Smoothing to prevent initial jump
-            targetPosition.set(0,0,0);
+            // Reset Target for Smoothing
+            targetPosition.set(0,0,5); // Initial guess back a bit
             targetQuaternion.set(0,0,0,1);
-            camera.position.set(0,0,0);
-            camera.quaternion.set(0,0,0,1);
-
+            
             updateStatus("LOCKED! Move Camera.");
         }
 
@@ -350,14 +325,13 @@
 
                 if (isScanning) {
                     let none = new cv.Mat();
-                    // Quality 0.15 for better points
                     cv.goodFeaturesToTrack(gray, p0, 100, 0.15, 7, none, 7, false, 0.04);
                     updateScanVisuals(p0);
-                    gray.copyTo(oldGray);
+                    gray.copyTo(oldGray); // Update reference constantly in scan
                     none.delete();
                     
                 } else if (isTracking) {
-                    // Larger Search Window (31x31) reduces jitter
+                    // Track features from Anchor Frame (oldGray) to Current Frame (gray)
                     cv.calcOpticalFlowPyrLK(oldGray, gray, p0, p1, st, err, new cv.Size(31, 31), 2);
 
                     let goodNew = [];
@@ -376,19 +350,28 @@
                         }
                     }
 
-                    if (validCount >= 6) { // Require more points for stability
+                    if (validCount >= 6) { 
                         if(imagePointsMat) imagePointsMat.delete();
                         if(objectPointsMat) objectPointsMat.delete();
                         
                         imagePointsMat = cv.matFromArray(validCount, 2, cv.CV_64FC1, goodNew);
+                        objectPointsMat = cv.matFromArray(validCount, 3, cv.CV_64FC1, goodOld3D);
                         
-                        if (useFallbackMath) {
-                            solveHomographyPose(goodOld3D, goodNew, rvec, tvec);
-                        } else {
-                            objectPointsMat = cv.matFromArray(validCount, 3, cv.CV_64FC1, goodOld3D);
-                            const success = cv.solvePnP(objectPointsMat, imagePointsMat, cameraMatrix, distCoeffs, rvec, tvec, false, cv.SOLVEPNP_ITERATIVE);
-                            if (success) updateThreeJSCamera(rvec, tvec);
-                        }
+                        // FIX: Use Extrinsic Guess to prevent Rotation Flips
+                        // We use the rvec/tvec from the previous frame as a hint
+                        const success = cv.solvePnP(
+                            objectPointsMat, 
+                            imagePointsMat, 
+                            cameraMatrix, 
+                            distCoeffs, 
+                            rvec, 
+                            tvec, 
+                            true, // useExtrinsicGuess = TRUE (Stabilizes rotation)
+                            cv.SOLVEPNP_ITERATIVE
+                        );
+                        
+                        if (success) updateThreeJSCamera(rvec, tvec);
+                        
                     } else {
                         isTracking = false;
                         isScanning = true;
@@ -414,29 +397,6 @@
             requestAnimationFrame(processLoop);
         }
 
-        function solveHomographyPose(objPoints, imgPoints, rvec, tvec) {
-            let cx_new = 0, cy_new = 0;
-            let cx_old = 0, cy_old = 0;
-            const count = imgPoints.length / 2;
-            
-            for(let i=0; i<count; i++) {
-                cx_new += imgPoints[i*2];
-                cy_new += imgPoints[i*2+1];
-                cx_old += (objPoints[i*3] / 0.01) + streamWidth/2;
-                cy_old += -(objPoints[i*3+1] / 0.01) + streamHeight/2;
-            }
-            
-            const dx = ((cx_new/count) - (cx_old/count));
-            const dy = ((cy_new/count) - (cy_old/count));
-            
-            tvec.data64F[0] = dx * 0.01;
-            tvec.data64F[1] = -dy * 0.01;
-            tvec.data64F[2] = 0;
-            
-            rvec.data64F[0] = 0; rvec.data64F[1] = 0; rvec.data64F[2] = 0;
-            updateThreeJSCamera(rvec, tvec);
-        }
-
         function updateThreeJSCamera(rvec, tvec) {
             try {
                 const R = new cv.Mat();
@@ -453,15 +413,13 @@
                     0, 0, 0, 1
                 );
 
+                // Invert because PnP gives World->Camera, we need Camera->World
                 const inverse = m.invert();
                 
-                // Instead of setting camera directly, set TARGET for smoothing
                 targetQuaternion.setFromRotationMatrix(inverse);
                 targetPosition.setFromMatrixPosition(inverse);
                 
-                // Handle coordinate system flip in the target 
-                // (Create temporary object to apply rotation then extract)
-                // Actually easier to just apply the rotation to the QUATERNION
+                // Fix OpenCV (Look +Z) to OpenGL (Look -Z) Coordinate System
                 const rotX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), Math.PI);
                 targetQuaternion.multiply(rotX);
 
